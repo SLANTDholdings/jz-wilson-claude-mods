@@ -1,20 +1,65 @@
 {
   "name": "claude-mods",
-  "owner": { "name": "jz-wilson" },
+  "owner": {
+    "name": "jz-wilson"
+  },
   "description": "Mods for Claude Code",
   "plugins": [
-    { "name": "prompt-refiner", "source": "./prompt-refiner" },
-    { "name": "cache-bar", "source": "./cache-bar" },
-    { "name": "cache-clock", "source": "./cache-clock" },
-    { "name": "chat-inventory", "source": "./chat-inventory" },
-    { "name": "effort-optimizer", "source": "./effort-optimizer" },
-    { "name": "filetree", "source": "./filetree" },
-    { "name": "handoff", "source": "./handoff" },
-    { "name": "helper-desk", "source": "./helper-desk" },
-    { "name": "helpin-per", "source": "./helpin-per" },
-    { "name": "mods", "source": "./mods" },
-    { "name": "reflect", "source": "./reflect" },
-    { "name": "replay-theater", "source": "./replay-theater" },
-    { "name": "screen-share", "source": "./screen-share" }
+    {
+      "name": "brain-dump",
+      "source": "./brain-dump"
+    },
+    {
+      "name": "prompt-refiner",
+      "source": "./prompt-refiner"
+    },
+    {
+      "name": "cache-bar",
+      "source": "./cache-bar"
+    },
+    {
+      "name": "cache-clock",
+      "source": "./cache-clock"
+    },
+    {
+      "name": "chat-inventory",
+      "source": "./chat-inventory"
+    },
+    {
+      "name": "effort-optimizer",
+      "source": "./effort-optimizer"
+    },
+    {
+      "name": "filetree",
+      "source": "./filetree"
+    },
+    {
+      "name": "handoff",
+      "source": "./handoff"
+    },
+    {
+      "name": "helper-desk",
+      "source": "./helper-desk"
+    },
+    {
+      "name": "helpin-per",
+      "source": "./helpin-per"
+    },
+    {
+      "name": "mods",
+      "source": "./mods"
+    },
+    {
+      "name": "reflect",
+      "source": "./reflect"
+    },
+    {
+      "name": "replay-theater",
+      "source": "./replay-theater"
+    },
+    {
+      "name": "screen-share",
+      "source": "./screen-share"
+    }
   ]
 }
