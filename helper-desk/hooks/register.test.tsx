@@ -47,6 +47,7 @@ function rig(on: On, files: Record<string, string>, stored: Record<string, unkno
 
   on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
   on('session.id', async () => ({ value: 'sess1' }) as never)
+  on('session.root', async () => ({ value: '/Users/test/vault' }) as never)
   on('session.usage', async () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: 0.42 } } }) as never)
   on('command.register', async () => ({ value: undefined }) as never)
   on('tool.register', async ($, e) => {
@@ -132,7 +133,7 @@ async function bandSays(v: { find: (q: object) => Promise<unknown>; findAll: (q:
 const bandProps = (bodyColumns = 40) => ({ isWorking: true, hasSurvey: false, maxRows: 20, bodyColumns, scroll: {}, view: {} }) as never
 
 /** The plan file this chat writes, whatever the home. */
-const planFile = (files: Record<string, string>) => Object.keys(files).find(k => k.endsWith('/.claude/mods-state/plan-sess1.json'))
+const planFile = (files: Record<string, string>) => Object.keys(files).find(k => k.endsWith('/.claude/mods-state/board--Users-test-vault.json'))
 
 const steps4 = (done: number, live: boolean) =>
   ['Read the brief', 'Draft the outline', 'Build the slides', 'Check the deck'].map((text, i) => ({
@@ -1546,5 +1547,5 @@ test('the home folder comes from HOME, not from where the plugin is loaded', { t
   // State files land under the same home (the harness may put a drive in front of the path).
   await $.tool.call({ tool: 'mcp__helper-desk__plan', tool_use_id: 'p1', title: 'T', steps: [{ text: 'a', status: 'pending' }] } as never)
   await clock.settle()
-  expect(Object.keys(files).some(k => k.endsWith('/Users/real/.claude/mods-state/plan-sess1.json')), 'plan under the real home').toBe(true)
+  expect(Object.keys(files).some(k => k.endsWith('/Users/real/.claude/mods-state/board--Users-test-vault.json')), 'plan under the real home').toBe(true)
 })

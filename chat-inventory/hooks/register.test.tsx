@@ -15,18 +15,22 @@ const MEMORY = [
  * as ~/.claude/... and the tests pass wherever the package sits.
  */
 const disk = (p: string) => {
-  const at = p.indexOf('/.claude/')
-  return at === -1 ? p : `~${p.slice(at)}`
+  for (const tag of ['/.claude/', '/.claude-fleet/']) {
+    const at = p.indexOf(tag)
+    if (at !== -1) return `~${p.slice(at)}`
+  }
+  return p
 }
 
 /** Mocks every $ call the mod makes. `files` is the fake disk. */
-function setup(on: On, files: Record<string, string>, opened: string[], runs: string[][]) {
+function setup(on: On, files: Record<string, string>, opened: string[], runs: string[][], runProc?: (argv: string[]) => Promise<{ exitCode: number; stdout: string; stderr: string }>) {
   on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
   on('command.register', async () => ({ value: undefined }) as never)
   on('command.list', async () => ({ value: [] }) as never)
   const clock = mock.clock(on, { now: 1_000_000 })
   on('session.id', async () => ({ value: 'sid' }) as never)
   on('session.cwd', async () => ({ value: '/Users/test/vault' }) as never)
+  on('session.root', async () => ({ value: '/Users/test/vault' }) as never)
   on('session.messages', async () => ({ value: [] }) as never)
   on('session.usage', async () =>
     ({
@@ -54,6 +58,7 @@ function setup(on: On, files: Record<string, string>, opened: string[], runs: st
     const argv = [...(e as { argv: readonly string[] }).argv]
     runs.push(argv)
     if (['rm', 'cmd'].includes(argv[0] ?? '')) delete files[disk(argv[argv.length - 1]!.replace(/\\/g, '/'))]
+    if (runProc) return { value: await runProc(argv) } as never
     return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
   })
   on('ui.invalidate', async () => ({ value: undefined }) as never)
@@ -213,22 +218,37 @@ for (const surface of ['desktop', 'terminal'] as const) {
 const SW = '~/.claude/mods/switches.json'
 
 for (const surface of ['desktop', 'terminal'] as const) {
-  test(`Hide writes the shared flag, closes the pane and stops auto-open (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+  test(`closing the pane writes the shared flag and stops auto-open (${surface})`, {
+    timeoutMs: 30000,
+    plugins: [
+      {
+        name: 'closer',
+        register(on) {
+          on('command.run', { command: 'test-close' }, async $ => {
+            await $.ui.close({ id: 'chat-inventory' })
+            return { text: 'ok' }
+          })
+        },
+      },
+    ],
+  }, async ($, on) => {
     const files: Record<string, string> = {}
     const opened: string[] = []
     const clock = setup(on, files, opened, [])
     await $.session.start({ source: 'startup', cwd: '/Users/test/vault', surface, isInteractive: true } as never)
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
-    expect(await ui.find({ key: 'hide' }), 'a Hide button').toBeDefined()
-    await ui.press({ key: 'hide' })
+    expect(await ui.find({ key: 'hide' }), 'Hide button replaced by dock close').toBeUndefined()
+    await ui.unmount()
+    await $.command.run({ command: 'test-close', args: '' } as never)
     expect(JSON.parse(files[SW] ?? '{}'), 'flag written').toEqual({ 'chat-inventory:hidden': true })
     expect(opened, 'the pane closed').toContain('closed:chat-inventory')
+    const afterHide = opened.lastIndexOf('closed:chat-inventory') + 1
 
     const call = $.tool.call as unknown as (input: Record<string, unknown>) => Promise<unknown>
     await call({ tool: 'mcp__00000000-0000-0000-0000-00000000000a__search_threads', tool_use_id: 't1', query: 'offer' })
     await clock.settle()
-    expect(opened, 'no auto-open while hidden').not.toContain('chat-inventory')
+    expect(opened.slice(afterHide), 'no auto-open while hidden').not.toContain('chat-inventory')
   })
 
   test(`clearing the flag lets Show open the pane again (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -308,7 +328,9 @@ for (const surface of ['desktop', 'terminal'] as const) {
   })
 }
 
-const PLAN_FILE = '~/.claude/mods-state/plan-sid.json'
+const PLAN_FILE = '~/.claude/mods-state/board--Users-test-vault.json'
+const FLEET_LOG = '~/.claude/mods-state/fleet-activity.jsonl'
+const FLEET_REG = '~/.claude-fleet/registry.json'
 
 for (const surface of ['desktop', 'terminal'] as const) {
   test(`a TodoWrite call draws three to-do rows with the right marks (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -332,15 +354,18 @@ for (const surface of ['desktop', 'terminal'] as const) {
     const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
     expect(await ui.find({ text: /^To-do$/ }), 'heading').toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^1 of 3$/ }), 'count on the right').toBeDefined()
-    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'one done mark').toBe(1)
+    expect(await ui.find({ text: /^Completed$/ }), 'Completed heading').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^1 today$/ }), 'Completed count').toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'one done mark in Completed').toBe(1)
     expect((await ui.findAll({ type: 'Text', text: /^●$/ })).length, 'one in-progress mark').toBe(1)
-    expect((await ui.findAll({ type: 'Text', text: /^○$/ })).length, 'one empty circle').toBe(1)
     const done = await ui.find({ type: 'Text', text: /^Read the brief$/ })
-    expect(done?.props.strikethrough, 'done text struck through').toBe(true)
-    expect(done?.props.dimColor, 'done text dim').toBe(true)
+    expect(done?.props.color, 'done text in Completed uses success color').toBe('success')
     const now = await ui.find({ type: 'Text', text: /^Writing the code$/ })
     expect(now?.props.weight, 'in-progress uses activeForm, bold').toBe('bold')
-    expect(await ui.find({ text: /^Run the checks$/ }), 'pending step').toBeDefined()
+    expect(await ui.find({ text: /^Run the checks$/ }), 'tabled folded by default').toBeUndefined()
+    await ui.press({ key: 't:tabled' })
+    expect((await ui.findAll({ type: 'Text', text: /^○$/ })).length, 'one empty circle once unfolded').toBe(1)
+    expect(await ui.find({ text: /^Run the checks$/ }), 'pending step shown once unfolded').toBeDefined()
     expect(await ui.find({ text: /No to-do list yet/ }), 'no empty line').toBeUndefined()
   })
 
@@ -365,9 +390,12 @@ for (const surface of ['desktop', 'terminal'] as const) {
 
     const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
     expect(await ui.find({ type: 'Text', text: /^2 of 4$/ }), 'count').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^2 today$/ }), 'Completed count').toBeDefined()
     expect(await ui.find({ text: /Churn check/ }), 'title').toBeDefined()
-    expect(await ui.find({ text: /^Build the sheet$/ }), 'pending step').toBeDefined()
     expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'two done marks').toBe(2)
+    expect(await ui.find({ text: /^Build the sheet$/ }), 'tabled folded by default').toBeUndefined()
+    await ui.press({ key: 't:tabled' })
+    expect(await ui.find({ text: /^Build the sheet$/ }), 'pending step once unfolded').toBeDefined()
     const lines = await ui.findAll({ type: 'Text', text: /Stripe|Circle|email/ })
     expect(lines.length, 'the long step wraps onto more than one line').toBeGreaterThan(1)
     for (const l of lines) expect(String(l.text ?? '').length, 'each line fits the pane').toBeLessThanOrEqual(42)
@@ -471,5 +499,73 @@ for (const surface of ['desktop', 'terminal'] as const) {
     await $.command.run({ command: 'inventory', args: 'hide' } as never)
     expect(JSON.parse(files[SW] ?? '{}'), 'hide writes the flag').toEqual({ 'chat-inventory:hidden': true })
     expect(opened, 'hide closes the pane').toContain('closed:chat-inventory')
+  })
+}
+
+for (const surface of ['desktop', 'terminal'] as const) {
+  test(`an unfinished fleet job with no pid running 20 h stays busy and never ages out (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const start = new Date(Date.now() - 20 * 3600_000).toISOString()
+    const files: Record<string, string> = {
+      [FLEET_REG]: JSON.stringify({ identities: [{ id: 'codex-a', name: 'codex-a', harness: 'codex', active: true }] }),
+      [FLEET_LOG]: `${JSON.stringify({ id: 'job-backup', who: 'codex-a', label: 'Mac backup', start })}\n`,
+    }
+    const clock = setup(on, files, [], [])
+    await $.session.start({ source: 'startup', cwd: '/Users/test/vault', surface, isInteractive: true } as never)
+    await clock.settle()
+    await clock.advance(3500)
+
+    const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
+    expect(await ui.find({ type: 'Text', text: /^1 active · 0 idle$/ }), 'seat counted active').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^active$/ }), 'seat row shows active').toBeDefined()
+    await ui.press({ key: 's:codex-a' })
+    expect(await ui.find({ type: 'Text', text: /^▶ $/ }), 'running mark').toBeDefined()
+    expect(await ui.find({ text: /Mac backup/ }), '20h job still listed').toBeDefined()
+  })
+
+  test(`when ps throws, unfinished fleet jobs stay alive and nothing is marked dead (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const start = new Date(Date.now() - 2 * 3600_000).toISOString()
+    const files: Record<string, string> = {
+      [FLEET_REG]: JSON.stringify({ identities: [{ id: 'codex-a', name: 'codex-a', harness: 'codex', active: true }] }),
+      [FLEET_LOG]: `${JSON.stringify({ id: 'job-1', who: 'codex-a', label: 'Audit repo', start, pid: '4242' })}\n`,
+    }
+    const clock = setup(on, files, [], [], async () => {
+      throw new Error('ps failed')
+    })
+    await $.session.start({ source: 'startup', cwd: '/Users/test/vault', surface, isInteractive: true } as never)
+    await clock.settle()
+    await clock.advance(3500)
+
+    const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
+    expect(await ui.find({ type: 'Text', text: /^1 active · 0 idle$/ }), 'seat stays active when ps throws').toBeDefined()
+    await ui.press({ key: 's:codex-a' })
+    expect(await ui.find({ type: 'Text', text: /^▶ $/ }), 'job still marked running').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^died$/ }), 'not marked died').toBeUndefined()
+  })
+
+  test(`a reused pid with an unrelated command is treated as dead (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const recentStart = new Date(Date.now() - 2 * 3600_000).toISOString()
+    const oldStart = new Date(Date.now() - 20 * 3600_000).toISOString()
+    const files: Record<string, string> = {
+      [FLEET_REG]: JSON.stringify({ identities: [{ id: 'codex-a', name: 'codex-a', harness: 'codex', active: true }] }),
+      [FLEET_LOG]: [
+        JSON.stringify({ id: 'job-recent', who: 'codex-a', label: 'Recent crashed job', start: recentStart, pid: '5151' }),
+        JSON.stringify({ id: 'job-old', who: 'codex-a', label: 'Old crashed job', start: oldStart, pid: '5252' }),
+      ].join('\n'),
+    }
+    const clock = setup(on, files, [], [], async () => ({
+      exitCode: 0,
+      stdout: ' 5151 /System/Applications/Calculator.app/Contents/MacOS/Calculator\n 5252 /usr/sbin/syslogd\n',
+      stderr: '',
+    }))
+    await $.session.start({ source: 'startup', cwd: '/Users/test/vault', surface, isInteractive: true } as never)
+    await clock.settle()
+    await clock.advance(3500)
+
+    const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
+    expect(await ui.find({ type: 'Text', text: /^0 active · 1 idle$/ }), 'seat is idle').toBeDefined()
+    await ui.press({ key: 's:codex-a' })
+    expect(await ui.find({ text: /Recent crashed job/ }), 'recent dead job still shown').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^died$/ }), 'recent job marked died').toBeDefined()
+    expect(await ui.find({ text: /Old crashed job/ }), '20h dead job aged out').toBeUndefined()
   })
 }

@@ -82,6 +82,16 @@ declare module 'claude-code' {
       folded: string[]
       /** First context file row shown in the 10-row window. */
       fileTop: number
+      /** Fleet jobs read from fleet-activity.jsonl. */
+      fleet: { id: string; who: string; label: string; start: string; end?: string; result?: string; pid?: string; alive?: boolean }[]
+      /** Fleet seats and their state. */
+      seats: { id: string; name: string; harness: string; status: 'active' | 'idle' | 'exhausted' | 'off'; until?: string; why?: string; note?: string; jobs: { id: string; who: string; label: string; start: string; end?: string; result?: string; pid?: string; alive?: boolean }[] }[]
+      /** Seats whose job list is dropped down. */
+      seatOpen: string[]
+      /** To-do groups that are open: az, active, tabled. */
+      todoOpen: string[]
+      /** Today's finished steps across every list, oldest first. */
+      doneLog: { text: string; title: string; day: string; at: number }[]
     }
   }
 }
