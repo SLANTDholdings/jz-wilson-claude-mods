@@ -4,6 +4,7 @@ import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 import type { CallRow, ConnectorRow, FileRow, Inventory, Plan, PlanStep, SkillRow } from '../types'
 import { CONNECTOR_NAMES, connectorName as nameOf, splitTool } from './connectors'
 import { LOGOS } from './logos'
+import { EYE, fleetMark, needsAz, readFleet, readSeats, stripEye, whenBack, type FleetJob, type Seat } from './fleet'
 
 const PLUGIN = 'chat-inventory'
 const NAME = 'chat-inventory'
@@ -14,7 +15,7 @@ const MAX_CALLS = 60
 // Context files show in a window this many rows tall; Up and Down move it.
 const FILE_WINDOW = 10
 const FILE_STEP = 5
-const SECTIONS = ['todo', 'connectors', 'files', 'skills'] as const
+const SECTIONS = ['todo', 'done', 'fleet', 'connectors', 'files', 'skills'] as const
 const OFF_LINE = 'Turned off. Open /mods to turn it on.'
 const NO_PLAN = 'No to-do list yet. Claude makes one for jobs with 3 or more steps.'
 // The plan tool helper-desk registers, and Claude's built-in list tools, all feed the To-do section.
@@ -36,6 +37,12 @@ const offAtom = atom({ plugin: 'chat-inventory', key: 'off' } as const, false)
 // Sections the person closed, and the first context file row shown. Kept per chat in $.state.
 const foldedAtom = atom({ plugin: 'chat-inventory', key: 'folded' } as const, [] as string[])
 const fileTopAtom = atom({ plugin: 'chat-inventory', key: 'fileTop' } as const, 0)
+const fleetAtom = atom({ plugin: 'chat-inventory', key: 'fleet' } as const, [] as FleetJob[])
+const seatsAtom = atom({ plugin: 'chat-inventory', key: 'seats' } as const, [] as Seat[])
+const seatOpenAtom = atom({ plugin: 'chat-inventory', key: 'seatOpen' } as const, [] as string[])
+const todoOpenAtom = atom({ plugin: 'chat-inventory', key: 'todoOpen' } as const, ['az', 'active'] as string[])
+type DoneEntry = { text: string; title: string; day: string; at: number }
+const doneLogAtom = atom({ plugin: 'chat-inventory', key: 'doneLog' } as const, [] as DoneEntry[])
 
 // Logo keys whose slug differs from the name.
 const ALIAS: Record<string, string> = { googleworkspace: 'google', metaads: 'meta' }
@@ -317,12 +324,13 @@ async function watchPlan($: EngineInterface, call: Record<string, unknown> & { t
   return changed
 }
 
-const planPath = (sid: string) => `${home}/.claude/mods-state/plan-${sid}.json`
+// One standing board per project, shared by every chat there: survives compaction, resume and new sessions.
+const boardPath = (root: string) => `${home}/.claude/mods-state/board-${root.replace(/[^A-Za-z0-9]/g, '-')}.json`
 
 /** Reads the shared plan file for this chat; it wins when it is newer than what the pane has. Never throws. */
 async function readPlan($: EngineInterface) {
   try {
-    const path = planPath(await $.session.id())
+    const path = boardPath(await $.session.root())
     if (!(await $.fs.exists(path))) return
     const json = JSON.parse(String(await $.fs.read(path))) as Record<string, unknown>
     const at = typeof json.updatedAt === 'string' ? Date.parse(json.updatedAt) : typeof json.updatedAt === 'number' ? json.updatedAt : NaN
@@ -336,8 +344,40 @@ async function readPlan($: EngineInterface) {
     })
     const title = typeof json.title === 'string' ? json.title.trim() : ''
     await update($, planAtom, () => ({ title, steps, updatedAt: at }))
+    await recordDone($)
   } catch (err) {
     await logError($, 'plan', err)
+  }
+}
+
+const doneLogPath = (root: string) => `${home}/.claude/mods-state/done-${root.replace(/[^A-Za-z0-9]/g, '-')}.json`
+const localDay = (ms: number) => {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** Adds the plan's finished steps to today's per-project log, so a new list never hides finished work. Never throws. */
+async function recordDone($: EngineInterface) {
+  try {
+    const path = doneLogPath(await $.session.root())
+    const now = await $.clock.now()
+    const today = localDay(now)
+    let log: DoneEntry[] = []
+    if (await $.fs.exists(path)) {
+      const json = JSON.parse(String(await $.fs.read(path))) as unknown
+      if (Array.isArray(json)) log = (json as DoneEntry[]).filter(d => d && typeof d.text === 'string' && d.day === today)
+    }
+    const plan = await read($, planAtom)
+    let added = false
+    for (const st of plan.steps) {
+      if (st.status !== 'completed' || log.some(d => d.text === st.text && d.title === plan.title)) continue
+      log.push({ text: st.text, title: plan.title, day: today, at: now })
+      added = true
+    }
+    if (added) await $.fs.write(path, `${JSON.stringify(log, null, 1)}\n`)
+    await update($, doneLogAtom, () => log)
+  } catch (err) {
+    await logError($, 'done-log', err)
   }
 }
 
@@ -366,8 +406,27 @@ function wrapLines(text: string, width: number): string[] {
   return lines
 }
 
+const paneWidthPath = () => `${home}/.claude/mods-state/chat-inventory-width.json`
+let paneColumns = 0
+async function readPaneColumns($: EngineInterface) {
+  try {
+    if (!paneColumns && (await $.fs.exists(paneWidthPath()))) paneColumns = Number(JSON.parse(String(await $.fs.read(paneWidthPath()))).columns) || 0
+  } catch {
+    paneColumns = 0
+  }
+  return paneColumns
+}
+/** Narrows the docked pane once, to two thirds of the width it first drew at, and keeps that width. */
+async function narrowPane($: EngineInterface, drawn: number) {
+  if (paneColumns || (await readPaneColumns($))) return
+  paneColumns = Math.max(24, Math.round((drawn * 2) / 3))
+  await $.fs.write(paneWidthPath(), `${JSON.stringify({ columns: paneColumns })}\n`)
+  await $.ui.open({ id: PANE, title: TITLE, columns: paneColumns })
+}
+
 async function openPane($: EngineInterface) {
-  await $.ui.open({ id: PANE, title: TITLE })
+  const columns = await readPaneColumns($)
+  await $.ui.open({ id: PANE, title: TITLE, ...(columns ? { columns } : {}) })
 }
 
 async function record($: EngineInterface, id: string, hits: Hit[]) {
@@ -485,6 +544,7 @@ async function seed($: EngineInterface) {
     }
   }
   if (planChanged) await update($, planAtom, cur => (cur.updatedAt >= plan.updatedAt ? cur : plan))
+  if (planChanged) await recordDone($)
   const times = all.some(m => m.toolUses.length) ? await callTimes($) : new Map<string, number>()
   const hits: Stamped[] = []
   for (const m of all) {
@@ -615,9 +675,16 @@ export const register: Register = on => {
       switchTimer = $.clock.every(3000, () => {
         void readSwitch($)
         if (!off) void readPlan($)
+        if (!off)
+          void readFleet($, home).then(async jobs => {
+            await update($, fleetAtom, () => jobs)
+            const seats = await readSeats($, home, jobs)
+            await update($, seatsAtom, () => seats)
+          })
       })
     void seed($)
       .then(() => readPlan($))
+      .then(() => recordDone($))
       .catch(err => logError($, 'seed', err))
     void loadMemoryFiles($).catch(err => logError($, 'memory', err))
     return next(e)
@@ -661,7 +728,10 @@ export const register: Register = on => {
       if ((ran as { deny?: unknown }).deny === undefined) {
         const call = e as unknown as Record<string, unknown> & { tool: string; tool_use_id: string }
         await record($, call.tool_use_id, hitsOf(call.tool, call))
-        if (await watchPlan($, call, (ran as { result?: unknown }).result, await $.clock.now())) autoOpen($)
+        if (await watchPlan($, call, (ran as { result?: unknown }).result, await $.clock.now())) {
+          autoOpen($)
+          await recordDone($)
+        }
       }
     } catch (err) {
       await logError($, 'tool.call', err)
@@ -692,6 +762,21 @@ export const register: Register = on => {
     return { element: e.element }
   })
 
+  // closeIsHide: the person's ✕ on the dock hides the pane in every chat, as Hide did.
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person' && !hidden) {
+      try {
+        const json = await readSwitches($)
+        json[HIDE_KEY] = true
+        await $.fs.write(switchesPath(), `${JSON.stringify(json, null, 2)}\n`)
+      } catch (err) {
+        await logError($, 'save hidden', err)
+      }
+      hidden = true
+    }
+    return next(e)
+  })
+
   on('ui.press', { plugin: 'chat-inventory', element: 'hide' }, async ($, e) => {
     await setHidden($, true)
     try {
@@ -699,6 +784,22 @@ export const register: Register = on => {
     } catch {
       // The toast is only a hint.
     }
+    return { element: e.element }
+  })
+
+  // A press on a To-do group (Active / Tabled / Completed) opens or folds it.
+  on('ui.press', { plugin: 'chat-inventory' }, async ($, e, next) => {
+    if (!e.element.startsWith('t:')) return next(e)
+    const id = e.element.slice(2)
+    await update($, todoOpenAtom, cur => (cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]))
+    return { element: e.element }
+  })
+
+  // A press on a fleet seat drops down its jobs; a second press folds them.
+  on('ui.press', { plugin: 'chat-inventory' }, async ($, e, next) => {
+    if (!e.element.startsWith('s:')) return next(e)
+    const id = e.element.slice(2)
+    await update($, seatOpenAtom, cur => (cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]))
     return { element: e.element }
   })
 
@@ -714,6 +815,7 @@ export const register: Register = on => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const width = Math.max(20, e.props.bodyColumns)
+    if (e.props.placement === 'dock' && !paneColumns) void narrowPane($, e.props.bodyColumns).catch(err => logError($, 'narrow', err))
     const inner = width - 4
     if (await read($, offAtom)) return <Text dimColor wrap="truncate-end">{OFF_LINE}</Text>
     const list = await read($, inv)
@@ -881,7 +983,8 @@ export const register: Register = on => {
     const todoRow = (st: PlanStep, i: number) => {
       const done = st.status === 'completed'
       const now = st.status === 'in_progress'
-      const lines = wrapLines(now && st.active ? st.active : st.text, textCols)
+      const az = needsAz(st.text) && !done
+      const lines = wrapLines(stripEye(now && st.active ? st.active : st.text), textCols - (az ? 3 : 0))
       return (
         <Box key={`todo:${i}`} flexDirection="row" width={inner} flexShrink={0}>
           <Box width={2} flexShrink={0}>
@@ -889,7 +992,8 @@ export const register: Register = on => {
           </Box>
           <Box flexDirection="column" width={textCols} flexShrink={0}>
             {lines.map((line, j) => (
-              <Text key={`l${j}`} wrap="truncate-end" dimColor={done} strikethrough={done} weight={now ? 'bold' : undefined}>
+              <Text key={`l${j}`} wrap="truncate-end" strikethrough={done} weight={now ? 'bold' : undefined} color={az ? 'merged' : !done && !now ? 'suggestion' : done ? GOOD : undefined}>
+                {az ? (j === 0 ? `${EYE} ` : '   ') : ''}
                 {line}
               </Text>
             ))}
@@ -898,19 +1002,111 @@ export const register: Register = on => {
       )
     }
     const doneCount = plan.steps.filter(st => st.status === 'completed').length
+    const todoOpen = await read($, todoOpenAtom)
+    const groupOf = (st: PlanStep) =>
+      st.status === 'completed' ? 'done' : needsAz(st.text) ? 'az' : st.status === 'in_progress' ? 'active' : 'tabled'
+    const todoTint = { az: 'merged', active: undefined, tabled: 'suggestion', done: GOOD } as Record<string, string | undefined>
+    const todoGroup = (id: string, name: string) => {
+      const items = plan.steps.map((st, i) => [st, i] as const).filter(([st]) => groupOf(st) === id)
+      const isOpen = todoOpen.includes(id)
+      return [
+        <Box key={`t:${id}`} flexDirection="row" justifyContent="space-between" width={inner} height={1} gap={1}>
+          <Button key={`t:${id}`} plain onPress={() => undefined}>
+            <Text color={ACCENT}>{isOpen ? '▾ ' : '▸ '}</Text>
+            <Text weight="bold" color={todoTint[id]}>{name}</Text>
+          </Button>
+          <Box flexShrink={0}>
+            <Text color={todoTint[id]} dimColor={!todoTint[id]}>{String(items.length)}</Text>
+          </Box>
+        </Box>,
+        ...(isOpen ? items.map(([st, i]) => todoRow(st, i)) : []),
+      ]
+    }
     const todoBody = plan.steps.length
       ? [
           ...(plan.title ? wrapLines(plan.title, inner).map((line, j) => <Text key={`pt${j}`} dimColor wrap="truncate-end">{line}</Text>) : []),
-          ...plan.steps.map(todoRow),
+          ...(plan.steps.some(st => groupOf(st) === 'az') ? todoGroup('az', 'Attention needed') : []),
+          ...todoGroup('active', 'Active'),
+          ...todoGroup('tabled', 'Tabled'),
+          <Text key="legend" dimColor wrap="truncate-end">{`● working · ○ waiting · ${EYE} needs you`}</Text>,
         ]
       : wrapLines(NO_PLAN, inner).map((line, j) => <Text key={`np${j}`} dimColor wrap="truncate-end">{line}</Text>)
 
+    // Completed: today's finished steps across every list, newest first, each under the list it came from.
+    const doneLog = [...(await read($, doneLogAtom))].reverse()
+    const doneBody = doneLog.length
+      ? doneLog.map((d, i) => {
+          const lines = wrapLines(d.text, inner - 2)
+          return (
+            <Box key={`done:${i}`} flexDirection="row" width={inner} flexShrink={0}>
+              <Box width={2} flexShrink={0}>
+                <Text color={GOOD}>✓</Text>
+              </Box>
+              <Box flexDirection="column" width={inner - 2} flexShrink={0}>
+                {lines.map((line, j) => (
+                  <Text key={`dl${j}`} wrap="truncate-end" color={GOOD}>
+                    {line}
+                  </Text>
+                ))}
+                {d.title ? <Text dimColor wrap="truncate-end">{d.title}</Text> : null}
+              </Box>
+            </Box>
+          )
+        })
+      : <Text dimColor wrap="truncate-end">Nothing finished yet today</Text>
+
+    // Fleet: one row per seat (press it for its jobs), its state on the right.
+    const seats = await read($, seatsAtom)
+    const seatOpen = await read($, seatOpenAtom)
+    const toneColor = { accent: ACCENT, good: GOOD, warn: 'warning', bad: 'error', dim: undefined } as const
+    const seatTone = { active: ACCENT, exhausted: 'error', idle: undefined, off: undefined } as const
+    const count = (s: Seat['status']) => seats.filter(x => x.status === s).length
+    const jobRow = (j: FleetJob) => {
+      const m = fleetMark(j)
+      const c = toneColor[m.tone]
+      return row(
+        `f:${j.id}`,
+        <Text wrap="truncate-end">
+          <Text>{'   '}</Text>
+          <Text color={c} dimColor={!c}>{`${m.mark} `}</Text>
+          <Text>{j.label}</Text>
+        </Text>,
+        <Text color={c} dimColor={!c}>{m.word}</Text>,
+      )
+    }
+    const seatRows = (s: Seat) => {
+      const isOpen = seatOpen.includes(s.id)
+      const c = seatTone[s.status]
+      const back = s.status === 'exhausted' ? ` (${s.until ? `back ${whenBack(s.until)}` : s.why === 'out of credits' ? 'needs credits' : 'back soon'})` : ''
+      const running = s.jobs.filter(j => !j.end && j.alive).length
+      const word = s.status === 'active' ? `active${running > 1 ? ` · ${running}` : ''}` : `${s.status}${back}`
+      return [
+        <Box key={`s:${s.id}`} flexDirection="row" justifyContent="space-between" width={inner} height={1} gap={1}>
+          <Button key={`s:${s.id}`} plain onPress={() => undefined}>
+            <Text color={ACCENT}>{s.jobs.length ? (isOpen ? '▾ ' : '▸ ') : '  '}</Text>
+            <Text weight="bold" dimColor={s.status === 'off'}>{s.name}</Text>
+            <Text dimColor>{` ${s.note ?? (s.name !== s.id ? s.id : '')}`}</Text>
+          </Button>
+          <Box flexShrink={0}>
+            <Text color={c} dimColor={!c}>{word}</Text>
+          </Box>
+        </Box>,
+        ...(isOpen ? s.jobs.slice(0, MAX_ROWS).map(jobRow) : []),
+      ]
+    }
+    const fleetBody = seats.length
+      ? [
+          ...seats.flatMap(seatRows),
+          <Text key="slegend" dimColor wrap="truncate-end">press a seat for its jobs</Text>,
+          <Text key="flegend" dimColor wrap="truncate-end">▶ running · ✓ pass · ✎ changes asked · ✗ failed</Text>,
+        ]
+      : <Text dimColor wrap="truncate-end">No fleet seats found</Text>
+
     return (
       <Box flexDirection="column" width={width}>
-        <Box key="top" flexDirection="row" justifyContent="flex-end" width={width}>
-          <Button key="hide" label="Hide" dimColor onPress={() => undefined} />
-        </Box>
         {section('todo', 'To-do', plan.steps.length ? `${doneCount} of ${plan.steps.length}` : '', todoBody)}
+        {section('done', 'Completed', doneLog.length ? `${doneLog.length} today` : '', doneBody)}
+        {section('fleet', 'Fleet', seats.length ? `${count('active')} active · ${count('idle')} idle${count('exhausted') ? ` · ${count('exhausted')} exhausted` : ''}` : '', fleetBody)}
         {section('connectors', 'Connectors', String(conns.length), connectorBody)}
         {section('files', 'Context files', String(files.length), fileBody)}
         {section('skills', 'Skills', String(skills.length), skillBody)}

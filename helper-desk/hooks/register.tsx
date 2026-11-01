@@ -1273,12 +1273,16 @@ function withNudge<R>(r: R): R {
   return { ...r, context: [...had, note] }
 }
 
-const planPath = () => `${home}/.claude/mods-state/plan-${sessionId}.json`
+// One standing board per project, shared by every chat there: survives compaction, resume and new sessions.
+let boardRoot = ''
+const boardPath = () => `${home}/.claude/mods-state/board-${boardRoot.replace(/[^A-Za-z0-9]/g, '-')}.json`
+const planPath = boardPath
 const doneCount = (steps: { status: PlanStatus }[]) => steps.filter(st => st.status === 'completed').length
 const isStatus = (v: unknown): v is PlanStatus => typeof v === 'string' && (STATUSES as readonly string[]).includes(v)
 
 async function writePlan($: EngineInterface) {
-  if (!plan || !sessionId || !home) return
+  boardRoot = (await $.session.root().catch(() => boardRoot)) || boardRoot
+  if (!plan || !boardRoot || !home) return
   try {
     const body = {
       title: plan.title,
@@ -1427,10 +1431,13 @@ async function mirror($: EngineInterface, tool: string, args: Record<string, unk
 
 /** A reload or resume carries on with the plan this chat already saved. */
 async function loadPlan($: EngineInterface) {
-  if (plan || !sessionId || !home) return
+  boardRoot = (await $.session.root().catch(() => boardRoot)) || boardRoot
+  if (!boardRoot || !home) return
   try {
     if (!(await $.fs.exists(planPath()))) return
     const json = JSON.parse(String(await $.fs.read(planPath()))) as { title?: unknown; steps?: unknown; updatedAt?: unknown }
+    // Another chat on this board saved a newer list: take it.
+    if (plan && !(typeof json.updatedAt === 'string' && json.updatedAt > plan.updatedAt)) return
     const steps: PlanStep[] = (Array.isArray(json.steps) ? (json.steps as Record<string, unknown>[]) : [])
       .filter(st => st && typeof st.text === 'string' && isStatus(st.status))
       .map(st => ({ text: String(st.text), status: st.status as PlanStatus, ...(typeof st.doneAt === 'string' ? { doneAt: st.doneAt } : {}) }))
@@ -1580,6 +1587,7 @@ export const register: Register = on => {
     await loadPlan($)
     await pollJev($)
     switcher ??= $.clock.every(SWITCH_MS, () => {
+      void loadPlan($)
       void switchPoll($).catch(err => log($, `switch: ${String(err)}`))
     })
     // A reload keeps the drawn copy: carry on from it.

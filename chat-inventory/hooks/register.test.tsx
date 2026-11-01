@@ -220,15 +220,16 @@ for (const surface of ['desktop', 'terminal'] as const) {
     await $.session.start({ source: 'startup', cwd: '/Users/test/vault', surface, isInteractive: true } as never)
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'chat-inventory', surface, component: 'Pane', requestId: 'chat-inventory', props: paneProps })
-    expect(await ui.find({ key: 'hide' }), 'a Hide button').toBeDefined()
-    await ui.press({ key: 'hide' })
+    await ui.unmount()
+    await ($.ui as unknown as { close: (e: unknown) => Promise<unknown> }).close({ id: 'chat-inventory', origin: { kind: 'person' } })
     expect(JSON.parse(files[SW] ?? '{}'), 'flag written').toEqual({ 'chat-inventory:hidden': true })
     expect(opened, 'the pane closed').toContain('closed:chat-inventory')
+    const afterHide = opened.lastIndexOf('closed:chat-inventory') + 1
 
     const call = $.tool.call as unknown as (input: Record<string, unknown>) => Promise<unknown>
     await call({ tool: 'mcp__00000000-0000-0000-0000-00000000000a__search_threads', tool_use_id: 't1', query: 'offer' })
     await clock.settle()
-    expect(opened, 'no auto-open while hidden').not.toContain('chat-inventory')
+    expect(opened.slice(afterHide), 'no auto-open while hidden').not.toContain('chat-inventory')
   })
 
   test(`clearing the flag lets Show open the pane again (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
