@@ -764,7 +764,7 @@ export const register: Register = on => {
 
   // closeIsHide: the person's ✕ on the dock hides the pane in every chat, as Hide did.
   on('ui.close', { id: PANE }, async ($, e, next) => {
-    if (e.origin.kind === 'person' && !hidden) {
+    if (e.origin.kind !== 'unload' && !hidden) {
       try {
         const json = await readSwitches($)
         json[HIDE_KEY] = true
@@ -1078,7 +1078,7 @@ export const register: Register = on => {
       const isOpen = seatOpen.includes(s.id)
       const c = seatTone[s.status]
       const back = s.status === 'exhausted' ? ` (${s.until ? `back ${whenBack(s.until)}` : s.why === 'out of credits' ? 'needs credits' : 'back soon'})` : ''
-      const running = s.jobs.filter(j => !j.end && j.alive).length
+      const running = s.jobs.filter(j => !j.end && j.alive !== false).length
       const word = s.status === 'active' ? `active${running > 1 ? ` · ${running}` : ''}` : `${s.status}${back}`
       return [
         <Box key={`s:${s.id}`} flexDirection="row" justifyContent="space-between" width={inner} height={1} gap={1}>

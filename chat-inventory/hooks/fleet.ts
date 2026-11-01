@@ -25,15 +25,25 @@ export async function readFleet($: EngineInterface, home: string): Promise<Fleet
     // Liveness is checked for every unfinished job, whatever its age: a long job (a day-long backup)
     // must keep its seat active. Only finished or dead jobs age out after 18 hours.
     const all = [...byId.values()].filter(j => j.start)
+    for (const j of all) if (!j.end) j.alive = true
     const open = all.filter(j => !j.end && j.pid)
     if (open.length) {
-      const r = await $.process.run(['ps', '-o', 'pid=', '-p', open.map(j => j.pid).join(',')]).catch(() => null)
-      const live = new Set(String((r as { stdout?: unknown } | null)?.stdout ?? '').split(/\s+/).filter(Boolean))
-      for (const j of open) j.alive = live.has(String(j.pid))
+      const r = await $.process.run(['ps', '-o', 'pid=,command=', '-p', open.map(j => j.pid).join(',')]).catch(() => null)
+      if (r !== null) {
+        const live = new Map<string, string>()
+        for (const line of String((r as { stdout?: unknown }).stdout ?? '').split('\n')) {
+          const m = /^\s*(\d+)\s+(.*)$/.exec(line)
+          if (m) live.set(m[1]!, m[2]!)
+        }
+        for (const j of open) {
+          const cmd = live.get(String(j.pid))
+          j.alive = Boolean(cmd && (cmd.includes('fleet run') || cmd.includes('fleet-go') || (j.who && cmd.includes(j.who)) || (j.id && cmd.includes(j.id))))
+        }
+      }
     }
     const since = Date.now() - 18 * 3600_000
-    const jobs = all.filter(j => (!j.end && j.alive) || Date.parse(j.start) >= since)
-    const running = (j: FleetJob) => (!j.end && j.alive ? 1 : 0)
+    const jobs = all.filter(j => (!j.end && j.alive !== false) || Date.parse(j.start) >= since)
+    const running = (j: FleetJob) => (!j.end && j.alive !== false ? 1 : 0)
     return jobs.sort((a, b) => running(b) - running(a) || b.start.localeCompare(a.start))
   } catch {
     return []
@@ -91,7 +101,7 @@ export async function readSeats($: EngineInterface, home: string, jobs: FleetJob
     const add = (id: string, name: string, harness: string, active: boolean) => {
       seen.add(id)
       const mine = jobs.filter(j => j.who === id)
-      const running = mine.some(j => !j.end && j.alive)
+      const running = mine.some(j => !j.end && j.alive !== false)
       let status: Seat['status'] = !active ? 'off' : running ? 'active' : 'idle'
       let until: string | undefined
       let why: string | undefined
