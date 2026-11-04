@@ -1,5 +1,7 @@
 # claude-mods
 
+> **Moved:** The SLANTD system-wide `chat-inventory` and `helper-desk` mod implementations now live at [`SLANTDholdings/software/tree/main/terminal-mods`](https://github.com/SLANTDholdings/software/tree/main/terminal-mods). This repository has a pending plain rename to `SLANTDholdings/terminal-mods` (see [`MOVED.md`](MOVED.md)).
+
 Mods for Claude Code.
 
 | Mod | What it does |
