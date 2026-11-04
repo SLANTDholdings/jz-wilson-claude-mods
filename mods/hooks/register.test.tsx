@@ -196,7 +196,7 @@ const disk: Record<string, string> = {
   '/.claude/mods/mods/hooks/hooks.json': JSON.stringify({ modules: ['./register.tsx'] }),
   '/.claude/mods/helper-desk/.claude-plugin/plugin.json': JSON.stringify({ name: 'helper-desk', description: 'long text' }),
   '/.claude/mods/helper-desk/hooks/hooks.json': JSON.stringify({ modules: ['./register.tsx'] }),
-  '/.claude/mods/helper-desk/hooks/register.tsx': "readSwitch('switches.json')",
+  [['/.claude/mods/helper-desk', 'hooks/register.tsx'].join('/')]: "readSwitch('switches.json')",
   '/opt/extra/alpha-env/.claude-plugin/plugin.json': JSON.stringify({ name: 'alpha-env', description: 'Found through the env list' }),
   '/opt/extra/alpha-env/hooks/hooks.json': JSON.stringify({ modules: ['./register.tsx'] }),
   '/opt/extra/alpha-env/hooks/register.tsx': "'switches.json'",
