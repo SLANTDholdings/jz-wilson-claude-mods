@@ -1,5 +1,7 @@
 # claude-mods
 
+**Official placement rules:** [Where things belong](https://github.com/SLANTDholdings/agents/blob/main/librarian/WHERE-THINGS-BELONG.md). Read the current routing table before naming or filing anything; it also points to the existing cheapest-capable-model roster.
+
 Mods for Claude Code.
 
 | Mod | What it does |
